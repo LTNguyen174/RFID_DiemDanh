@@ -1,7 +1,7 @@
 import json
 import os
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from typing import List, Dict, Any, Optional
 
 from langchain_google_genai import ChatGoogleGenerativeAI
@@ -9,7 +9,7 @@ from langchain_core.prompts import PromptTemplate
 from sqlalchemy import inspect, text
 
 from ..db import AsyncSessionLocal
-from ..models import Student, AttendanceLog, ClassModel
+from ..models import Student, AttendanceLog, ClassModel, User
 from ..settings import settings
 
 
@@ -42,6 +42,16 @@ def _extract_text_from_content(content) -> str:
 
 # ─── Prompt 1: Hiểu câu hỏi → sinh SQL ───────────────────────────────────────
 SQL_PROMPT_TEMPLATE = """Bạn là chuyên gia SQL PostgreSQL. Nhiệm vụ: đọc hiểu câu hỏi, suy luận logic, rồi sinh đúng 1 câu SELECT.
+
+═══ QUYỀN RIÊNG TƯ ═══
+QUAN TRỌNG: Người dùng chỉ được truy cập thông tin của bản thân!
+- Nếu là SINH VIÊN: Chỉ được xem thông tin điểm danh, lịch học của chính mình
+- Nếu là GIẢNG VIÊN: Chỉ được xem thông tin sinh viên trong các lớp mình được phân công
+
+═══ THÔNG TIN USER HIỆN TẠI ═══
+- User Role: {user_role}
+- User ID: {user_id}
+{user_filter_instruction}
 
 ═══ SCHEMA ═══
 {schema}
@@ -81,8 +91,7 @@ first_scan_time        : kiểu TIMESTAMP
 2. THỜI GIAN nào?
    - "hôm nay"    → cs.date = CURRENT_DATE
    - "hôm qua"    → cs.date = CURRENT_DATE - INTERVAL '1 day'
-   - "tuần này"   → cs.date >= date_trunc('week', CURRENT_DATE + INTERVAL '1 day') - INTERVAL '1 day'
-                    AND cs.date <  date_trunc('week', CURRENT_DATE + INTERVAL '1 day') + INTERVAL '6 days'
+   - "tuần này"   → cs.date >= CURRENT_DATE - INTERVAL '6 days' AND cs.date <= CURRENT_DATE
    - "tháng này"  → date_trunc('month', cs.date) = date_trunc('month', CURRENT_DATE)
    - ngày cụ thể  → cs.date = 'YYYY-MM-DD'::DATE
    - Khi hỏi về lớp CỤ THỂ mà KHÔNG nói ngày → TÌM session gần nhất của lớp đó:
@@ -194,7 +203,23 @@ ORDER BY sv.class_code;
   PHẢI dùng subquery: cs.date = (SELECT MAX(cs2.date) FROM class_sessions cs2 WHERE cs2.class_id = c.id AND cs2.status != 'cancelled')
   Hoặc lấy ngày gần nhất từ bảng class_sessions cho lớp đó rồi JOIN với attendance_logs
 
-Câu hỏi: "{question}"
+═══ CONTEXT CUỘC TRÒ CHUYỆN ═══
+Để hiểu các câu hỏi liên tiếp, hãy xem context trước đó:
+{context}
+
+⚠️ QUAN TRỌNG - Xử lý câu hỏi liên tiếp:
+- Nếu user hỏi "môn nào", "lớp nào", "học gì" → tham khảo context để biết các lớp đã được đề cập
+- Nếu user hỏi về điểm danh/vắng mặt → kiểm tra attendance_logs cho các lớp trong context
+- Nếu user hỏi "có...không" → trả lời YES/NO dựa trên dữ liệu thực tế
+- Context có thể chứa tên lớp (TEST123, TEST11) giúp hiểu "môn nào" = các lớp đó
+
+🚨 CỰC KỲ QUAN TRỌNG - Xử lý VẮNG MẶT:
+- "vắng", "không đến", "chưa điểm danh" → Dùng LEFT JOIN attendance_logs WHERE al.id IS NULL
+- KHÔNG TÌM al.status = 'absent' (không tồn tại)
+- Dùng MẪU A/B trong hướng dẫn để tìm người vắng
+- Nếu hỏi "môn nào tôi vắng" → tìm các session mà user không có attendance_logs
+
+Câu hỏi hiện tại: "{question}"
 SQL:"""
 
 
@@ -206,6 +231,19 @@ Quy tắc trả lời:
 - Nếu có dữ liệu → tóm tắt ngắn gọn, liệt kê tên cụ thể nếu ít hơn 10 người
 - Dịch các giá trị status: 'on_time'=đúng giờ, 'late'=đi muộn
 - Trả lời thân thiện, tự nhiên như người thật
+
+⚠️ QUAN TRỌNG - Xử lý dữ liệu lịch học:
+- Mỗi record = 1 BUỔI HỌC (1 session), không phải 1 lớp học
+- Nếu hỏi về "buổi học", "lịch học" → đếm số records
+- Nếu hỏi về "lớp học" → đếm số lớp KHÁC NHAU (group by class_code)
+- Nếu hỏi về lịch trong 1 ngày → liệt kê các buổi học trong ngày đó
+- KHÔNG nói "có 6 buổi học" khi thực chất chỉ có 1 buổi học của 1 lớp
+
+🚨 CỰC KỲ QUAN TRỌNG - Xử lý VẮNG MẶT:
+- Nếu dữ liệu có class_code, date, student_code → đây là danh sách vắng mặt
+- Nếu hỏi "môn nào tôi vắng" và có dữ liệu → liệt kê các môn học đó
+- Nếu hỏi "môn nào tôi vắng" và không có dữ liệu → trả lời "Bạn không vắng môn nào"
+- LUÔN tin vào dữ liệu: nếu có dữ liệu vắng mặt thì báo có vắng, nếu không có dữ liệu thì báo không vắng
 
 Câu hỏi: {question}
 
@@ -362,7 +400,7 @@ LIMIT 200
 
 
 class AIService:
-    def __init__(self):
+    def __init__(self, current_user: Optional[User] = None):
         self.gemini_api_key = settings.gemini_api_key
         if not self.gemini_api_key:
             raise ValueError("GEMINI_API_KEY is required in environment variables")
@@ -373,7 +411,95 @@ class AIService:
             temperature=0.0,
             convert_system_message_to_human=True,
         )
+        self.current_user = current_user
+        self.conversation_context = []  # Lưu trữ context của cuộc trò chuyện
         self._setup_templates()
+
+    def _get_privacy_filters(self) -> str:
+        """Tạo điều kiện WHERE để đảm bảo quyền riêng tư."""
+        if not self.current_user:
+            return "1=0"  # Không cho phép truy cập nếu không có user
+            
+        user_role = self.current_user.role
+        user_id = str(self.current_user.id)
+        
+        if user_role == "student":
+            # Sinh viên chỉ được xem thông tin của bản thân
+            # Cần đảm bảo có JOIN với student_classes nếu query liên quan đến lớp
+            return f"s.id = '{user_id}'"
+        elif user_role == "teacher":
+            # Giảng viên chỉ được xem thông tin sinh viên trong các lớp mình dạy
+            # Filter này chỉ áp dụng khi query có JOIN với classes hoặc class_sessions
+            return f"""
+            EXISTS (
+                SELECT 1 FROM class_teacher_assignments cta 
+                WHERE cta.teacher_user_id = '{user_id}'
+                AND cta.class_id = c.id
+            )
+            """
+        else:
+            # Admin có thể xem tất cả
+            return "1=1"
+
+    def _apply_privacy_to_sql(self, sql: str) -> str:
+        """Áp dụng bộ lọc quyền riêng tư vào câu SQL."""
+        if not self.current_user or self.current_user.role == "admin":
+            return sql
+            
+        user_role = self.current_user.role
+        user_id = str(self.current_user.id)
+        
+        # Replace any CURRENT_USER patterns with actual user ID (catch all cases)
+        # Order matters: replace specific patterns first, then general
+        sql = sql.replace("s.student_code = CURRENT_USER", f"s.id = '{user_id}'")
+        sql = sql.replace("student_code = CURRENT_USER", f"s.id = '{user_id}'")
+        sql = sql.replace("s.student_id = CURRENT_USER", f"s.id = '{user_id}'")
+        sql = sql.replace("CURRENT_USER", f"'{user_id}'")
+        
+        sql_upper = sql.upper()
+        
+        # Xử lý riêng cho student - cần đảm bảo JOIN đúng
+        if user_role == "student":
+            # Chỉ áp dụng privacy filter khi query có JOIN với students
+            if "students s" in sql_upper or " s." in sql_upper:
+                privacy_filter = self._get_privacy_filters()
+                if " WHERE " in sql_upper:
+                    return sql.replace(" WHERE ", f" WHERE {privacy_filter} AND ")
+                else:
+                    order_pos = sql_upper.find(" ORDER BY ")
+                    limit_pos = sql_upper.find(" LIMIT ")
+                    
+                    if order_pos != -1:
+                        return sql[:order_pos] + f" WHERE {privacy_filter} " + sql[order_pos:]
+                    elif limit_pos != -1:
+                        return sql[:limit_pos] + f" WHERE {privacy_filter} " + sql[limit_pos:]
+                    else:
+                        return sql + f" WHERE {privacy_filter}"
+            else:
+                # Query không liên quan đến students, cho phép truy cập
+                return sql
+        elif user_role == "teacher":
+            # Chỉ áp dụng teacher filter khi query có JOIN với classes hoặc class_sessions
+            if "classes c" in sql_upper or "class_sessions cs" in sql_upper or "cs." in sql_upper:
+                privacy_filter = self._get_privacy_filters()
+                if " WHERE " in sql_upper:
+                    return sql.replace(" WHERE ", f" WHERE {privacy_filter} AND ")
+                else:
+                    order_pos = sql_upper.find(" ORDER BY ")
+                    limit_pos = sql_upper.find(" LIMIT ")
+                    
+                    if order_pos != -1:
+                        return sql[:order_pos] + f" WHERE {privacy_filter} " + sql[order_pos:]
+                    elif limit_pos != -1:
+                        return sql[:limit_pos] + f" WHERE {privacy_filter} " + sql[limit_pos:]
+                    else:
+                        return sql + f" WHERE {privacy_filter}"
+            else:
+                # Query không liên quan đến classes, cho phép truy cập (ví dụ: thông tin cá nhân của sinh viên)
+                return sql
+        else:
+            # Admin có thể xem tất cả
+            return sql
 
     def _get_dynamic_schema(self) -> str:
         try:
@@ -400,7 +526,7 @@ class AIService:
 
     def _setup_templates(self):
         self.sql_prompt = PromptTemplate(
-            input_variables=["schema", "question"],
+            input_variables=["schema", "question", "context"],
             template=SQL_PROMPT_TEMPLATE,
         )
         self.answer_prompt = PromptTemplate(
@@ -411,6 +537,78 @@ class AIService:
             input_variables=["question"],
             template=REPORT_EXTRACT_PROMPT,
         )
+    
+    def _update_context(self, question: str, entities: List[str] = None):
+        """Cập nhật context của cuộc trò chuyện."""
+        # Giữ chỉ 5 câu hỏi gần nhất để tránh context quá dài
+        if len(self.conversation_context) >= 5:
+            self.conversation_context.pop(0)
+        
+        # Trích xuất entities quan trọng (tên lớp, môn học, etc.)
+        if entities is None:
+            entities = self._extract_entities(question)
+        
+        self.conversation_context.append({
+            "question": question,
+            "entities": entities,
+            "timestamp": datetime.now().isoformat()
+        })
+    
+    def _extract_entities(self, question: str) -> List[str]:
+        """Trích xuất entities quan trọng từ câu hỏi."""
+        entities = []
+        question_lower = question.lower()
+        
+        # Tìm tên lớp (ví dụ: lớp CT101, IT201, etc.)
+        import re
+        # Pattern cho mã lớp (CT101, IT201, etc.)
+        class_pattern = r'\b[A-Z]{2,4}\d{3,4}\b'
+        class_matches = re.findall(class_pattern, question.upper())
+        entities.extend(class_matches)
+        
+        # Pattern cho tên môn học
+        subjects = ['toán', 'lý', 'hóa', 'sinh', 'văn', 'sử', 'địa', 'anh', 'tin', 'công nghệ thông tin']
+        for subject in subjects:
+            if subject in question_lower:
+                entities.append(subject)
+        
+        # Pattern cho các từ khóa quan trọng khác
+        keywords = ['điểm danh', 'buổi học', 'lớp học', 'môn học', 'thời khóa biểu']
+        for keyword in keywords:
+            if keyword in question_lower:
+                entities.append(keyword)
+        
+        # Pattern cho các từ khóa liên quan đến môn học/lớp học
+        related_keywords = ['môn', 'lớp', 'học', 'bài', 'chủ đề']
+        for keyword in related_keywords:
+            if keyword in question_lower:
+                entities.append(keyword)
+        
+        return list(set(entities))  # Loại bỏ trùng lặp
+    
+    def _get_context_string(self) -> str:
+        """Lấy context dạng string để đưa vào prompt."""
+        if not self.conversation_context:
+            return "Chưa có context cuộc trò chuyện."
+        
+        context_parts = []
+        for ctx in self.conversation_context:
+            entities_str = ", ".join(ctx["entities"]) if ctx["entities"] else "không có entities"
+            context_parts.append(f"- Câu hỏi: '{ctx['question']}' (Entities: {entities_str})")
+        
+        # Thêm thông tin về các lớp đã được đề cập
+        mentioned_classes = set()
+        for ctx in self.conversation_context:
+            for entity in ctx.get("entities", []):
+                # Kiểm tra nếu entity là mã lớp (ví dụ: TEST123, TEST11)
+                import re
+                if re.match(r'^[A-Z]{2,4}\d{3,4}$', entity):
+                    mentioned_classes.add(entity)
+        
+        if mentioned_classes:
+            context_parts.append(f"\nCác lớp đã được đề cập trong cuộc trò chuyện: {', '.join(sorted(mentioned_classes))}")
+        
+        return "\n".join(context_parts)
 
     # ─── Nhận diện câu hỏi báo cáo ───────────────────────────────────────────
     def _is_report_request(self, question: str) -> bool:
@@ -422,6 +620,102 @@ class AIService:
         ]
         q_lower = question.lower()
         return any(kw in q_lower for kw in keywords)
+    
+    def _is_schedule_query(self, question: str) -> bool:
+        """Kiểm tra xem câu hỏi có phải về lịch học/thời khóa biểu không."""
+        keywords = [
+            "lịch học", "thời khóa biểu", "lịch", "schedule",
+            "buổi học", "học", "lớp học", "môn học",
+            "tuần này", "hôm nay", "hôm qua",
+        ]
+        q_lower = question.lower()
+        return any(kw in q_lower for kw in keywords)
+    
+    def _apply_schedule_optimization(self, question: str, sql_query: str) -> str:
+        """Tối ưu SQL query cho lịch học để tránh duplicates."""
+        if not self._is_schedule_query(question):
+            return sql_query
+        
+        # Nếu query về lịch học, thêm DISTINCT để loại bỏ duplicates
+        if "SELECT" in sql_query.upper() and "DISTINCT" not in sql_query.upper():
+            sql_query = sql_query.replace("SELECT", "SELECT DISTINCT", 1)
+        
+        return sql_query
+
+    def _is_privacy_violation(self, question: str) -> bool:
+        """Kiểm tra xem câu hỏi có vi phạm quyền riêng tư không."""
+        if not self.current_user or self.current_user.role == "admin":
+            return False
+            
+        user_role = self.current_user.role
+        q_lower = question.lower()
+        
+        if user_role == "student":
+            # Sinh viên không được hỏi về sinh viên khác, lớp học khác
+            student_violations = [
+                "sinh viên khác", "sv khác", "bạn học", "người khác",
+                "lớp khác", "lớp của bạn", "lớp của người khác",
+                "thông tin riêng tư", "số điện thoại",
+                "email", "địa chỉ", "cccd", "cmnd",
+            ]
+            
+            # Kiểm tra nếu hỏi về người khác
+            if any(violation in q_lower for violation in student_violations):
+                return True
+            
+            # Cho phép hỏi thông tin cá nhân của bản thân
+            if "thông tin cá nhân" in q_lower and any(indicator in q_lower for indicator in ["của tôi", "mình", "của mình", "của bản thân"]):
+                return False
+                
+            # Kiểm tra nếu hỏi về lớp học không phải của mình (khó phát hiện chính xác, nhưng cảnh báo)
+            # Cho phép hỏi về điểm danh/vắng mặt của bản thân
+            if any(keyword in q_lower for keyword in ["vắng", "điểm danh", "có mặt", "đi học"]) and any(indicator in q_lower for indicator in ["tôi", "mình"]):
+                return False  # Cho phép hỏi về điểm danh bản thân
+                
+            # Chỉ coi là violation nếu hỏi về lớp/môn học khác mà không có indicator bản thân
+            if any(keyword in q_lower for keyword in ["lớp", "môn học", "khóa học"]) and not any(keyword in q_lower for keyword in ["của tôi", "mình", "của mình", "tôi"]):
+                return True
+                
+        elif user_role == "teacher":
+            # Giảng viên không được hỏi về sinh viên lớp khác giảng viên dạy
+            teacher_violations = [
+                "sinh viên lớp khác", "sv lớp khác", "lớp khác giảng viên",
+                "lớp không phải của tôi", "lớp tôi không dạy",
+                "thông tin giảng viên khác", "giảng viên khác",
+            ]
+            
+            # Cho phép hỏi thông tin cá nhân của bản thân
+            if "thông tin cá nhân" in q_lower and any(indicator in q_lower for indicator in ["của tôi", "mình", "của mình", "của bản thân"]):
+                return False
+            
+            if any(violation in q_lower for violation in teacher_violations):
+                return True
+                
+        return False
+
+    def _get_privacy_warning(self, question: str) -> str:
+        """Lấy câu cảnh báo theo vai trò người dùng."""
+        if not self.current_user:
+            return "Xin lỗi, bạn cần đăng nhập để sử dụng chức năng này."
+            
+        user_role = self.current_user.role
+        
+        if user_role == "student":
+            return (
+                "⚠️ **Cảnh báo quyền riêng tư!**\n\n"
+                "Với vai trò sinh viên, bạn chỉ có thể truy cập thông tin điểm danh và lịch học của chính mình.\n\n"
+                "Bạn không thể xem thông tin của sinh viên khác, lớp học không liên quan, hoặc thông tin cá nhân của người khác.\n\n"
+                "Vui lòng hỏi lại về thông tin của bản thân hoặc liên hệ quản trị viên nếu cần thông tin khác."
+            )
+        elif user_role == "teacher":
+            return (
+                "⚠️ **Cảnh báo quyền riêng tư!**\n\n"
+                "Với vai trò giảng viên, bạn chỉ có thể xem thông tin sinh viên trong các lớp mình được phân công.\n\n"
+                "Bạn không thể xem thông tin sinh viên của lớp khác giảng viên dạy hoặc thông tin giảng viên khác.\n\n"
+                "Vui lòng hỏi lại về các lớp bạn đang dạy hoặc liên hệ quản trị viên nếu cần thông tin khác."
+            )
+        else:
+            return "Xin lỗi, câu hỏi này không được hỗ trợ."
 
     async def _extract_report_params(self, question: str) -> Dict[str, Any]:
         """Dùng AI để trích xuất tham số báo cáo từ câu hỏi."""
@@ -450,10 +744,7 @@ class AIService:
         elif date_filter == "yesterday":
             return f"{alias}.date = CURRENT_DATE - INTERVAL '1 day'"
         elif date_filter == "this_week":
-            return (
-                f"{alias}.date >= date_trunc('week', CURRENT_DATE + INTERVAL '1 day') - INTERVAL '1 day' "
-                f"AND {alias}.date < date_trunc('week', CURRENT_DATE + INTERVAL '1 day') + INTERVAL '6 days'"
-            )
+            return f"{alias}.date >= CURRENT_DATE - INTERVAL '6 days' AND {alias}.date <= CURRENT_DATE"
         elif date_filter == "this_month":
             return f"date_trunc('month', {alias}.date) = date_trunc('month', CURRENT_DATE)"
         elif re.match(r"\d{4}-\d{2}-\d{2}", date_filter):
@@ -482,6 +773,117 @@ class AIService:
     # ─── TẠO BÁO CÁO LỚP CỤ THỂ ─────────────────────────────────────────────
     from .report_builder import build_class_report_xlsx
     from .report_builder import build_daily_report_xlsx
+
+    async def generate_class_report(self, class_id: int, start_date: date, end_date: date) -> Dict[str, Any]:
+        # Áp dụng quyền riêng tư cho báo cáo
+        if not self.current_user or self.current_user.role == "admin":
+            # Admin có thể xem tất cả
+            pass
+        elif self.current_user.role == "teacher":
+            # Giảng viên chỉ được xem báo cáo các lớp mình dạy
+            teacher_classes_query = text("""
+                SELECT COUNT(*) as count
+                FROM class_teacher_assignments 
+                WHERE teacher_user_id = :user_id AND class_id = :class_id
+            """)
+            async with AsyncSessionLocal() as session:
+                result = await session.execute(teacher_classes_query, {
+                    "user_id": str(self.current_user.id),
+                    "class_id": class_id
+                })
+                count = result.scalar()
+                if count ==0:
+                    return {
+                        "success": False,
+                        "error": "Bạn không có quyền truy cập báo cáo của lớp này",
+                        "answer": "Bạn không có quyền truy cập báo cáo của lớp này"
+                    }
+        
+        # Tiếp tục với logic báo cáo...
+        try:
+            # Lấy thông tin session (thử tìm session hôm nay, nếu không có thì lấy session gần nhất)
+            async with AsyncSessionLocal() as session:
+                # Thử tìm session hôm nay trước
+                session_query = text("""
+                    SELECT cs.id, cs.date, cs.start_time, cs.end_time, 
+                           c.class_code, c.name as class_name
+                    FROM class_sessions cs
+                    JOIN classes c ON c.id = cs.class_id
+                    WHERE c.class_code ILIKE :class_code 
+                      AND cs.date = :target_date
+                      AND cs.status != 'cancelled'
+                    ORDER BY cs.start_time
+                """)
+                
+                result = await session.execute(session_query, {
+                    "class_code": f"%{class_id}%" if class_id else "%",
+                    "target_date": start_date
+                })
+                session_info = result.fetchone()
+                
+                # Nếu không có session hôm nay, lấy session gần nhất
+                if not session_info:
+                    fallback_query = text("""
+                        SELECT cs.id, cs.date, cs.start_time, cs.end_time, 
+                               c.class_code, c.name as class_name
+                        FROM class_sessions cs
+                        JOIN classes c ON c.id = cs.class_id
+                        WHERE c.class_code ILIKE :class_code 
+                          AND cs.status != 'cancelled'
+                        ORDER BY cs.date DESC, cs.start_time DESC
+                        LIMIT 1
+                    """)
+                    
+                    fallback_result = await session.execute(fallback_query, {
+                        "class_code": f"%{class_id}%" if class_id else "%"
+                    })
+                    session_info = fallback_result.fetchone()
+                    
+                    if session_info:
+                        print(f"[DEBUG] Using fallback session: {session_info.date}")
+                
+                if not session_info:
+                    return {
+                        "success": False,
+                        "error": f"Không tìm thấy buổi học nào của lớp {class_id}",
+                        "answer": f"Không tìm thấy buổi học nào của lớp {class_id}"
+                    }
+                
+                # Lấy chi tiết điểm danh - dùng ngày của session thực tế
+                actual_session_date = session_info.date
+                detail_query = text(CLASS_DETAIL_REPORT_SQL)
+                detail_result = await session.execute(detail_query, {
+                    "class_code": f"%{class_id}%" if class_id else "%",
+                    "target_date": actual_session_date
+                })
+                detail_rows = [dict(zip(detail_result.keys(), row)) for row in detail_result.fetchall()]
+            
+            # Tạo file Excel
+            session_dict = dict(zip(result.keys(), session_info))
+            file_path = build_class_report_xlsx(session_dict, detail_rows)
+            
+            # Kiểm tra file_path
+            if isinstance(file_path, tuple):
+                file_path = file_path[0]  # Lấy phần tử đầu tiên nếu là tuple
+            
+            # Trả về đường dẫn file
+            filename = os.path.basename(file_path)
+            actual_date_str = str(session_info.date)
+            return {
+                "success": True,
+                "report_type": "class",
+                "file_path": file_path,
+                "filename": filename,
+                "date": actual_date_str
+            }
+        except Exception as e:
+            print(f"[ERROR] Generate class report: {e}")
+            return {
+                "success": False,
+                "error": str(e),
+                "answer": "Đã có lỗi xảy ra. Vui lòng thử cách hỏi khác."
+            }
+
     # ─── Chat thông thường ────────────────────────────────────────────────────
     def _clean_sql_output(self, raw_output) -> str:
         cleaned = _extract_text_from_content(raw_output).strip()
@@ -516,6 +918,17 @@ class AIService:
         - Chế độ chat thường → trả lời tự nhiên
         """
         try:
+            # ── Kiểm tra quyền riêng tư trước ──
+            if self._is_privacy_violation(question):
+                return {
+                    "success": False,
+                    "question": question,
+                    "error": "Privacy violation",
+                    "answer": self._get_privacy_warning(question),
+                    "data": [],
+                    "count": 0,
+                }
+
             # ── Nếu là yêu cầu báo cáo ──
             if self._is_report_request(question):
                 print(f"[DEBUG] Detected report request: {question}")
@@ -531,9 +944,32 @@ class AIService:
                     return await self._generate_daily_report(params)
 
             # ── Chat thông thường ──
+            # Cập nhật context trước khi xử lý
+            self._update_context(question)
+            
+            # Lấy context để đưa vào prompt
+            context_str = self._get_context_string()
+            print(f"[DEBUG] Conversation context: {context_str}")
+            
+            # Tạo prompt với context và thông tin user
+            user_role = self.current_user.role if self.current_user else "unknown"
+            user_id = str(self.current_user.id) if self.current_user else "unknown"
+            
+            # Tạo hướng dẫn filter theo role
+            if user_role == "student":
+                user_filter_instruction = "- Khi câu hỏi về bản thân ('tôi', 'mình') → dùng s.id = '" + user_id + "'"
+            elif user_role == "teacher":
+                user_filter_instruction = "- Khi query có classes/class_sessions → thêm EXISTS filter với teacher_user_id = '" + user_id + "'"
+            else:
+                user_filter_instruction = "- Admin có thể truy cập tất cả dữ liệu"
+            
             prompt_value = self.sql_prompt.invoke({
                 "schema": self._get_dynamic_schema(),
                 "question": question,
+                "context": context_str,
+                "user_role": user_role,
+                "user_id": user_id,
+                "user_filter_instruction": user_filter_instruction,
             })
             response = await self.llm.ainvoke(prompt_value)
             content = _extract_text_from_content(response.content)
@@ -545,21 +981,37 @@ class AIService:
                 return {
                     "success": False,
                     "error": err_msg,
-                    "answer": f"Xin lỗi, câu lệnh SQL không hợp lệ: {err_msg}",
+                    "answer": err_msg
                 }
 
+            # Áp dụng bộ lọc quyền riêng tư
+            filtered_sql = self._apply_privacy_to_sql(sql_query)
+            print(f"[DEBUG] Optimized SQL: {filtered_sql}")
+
+            # Áp dụng tối ưu cho lịch học
+            filtered_sql = self._apply_schedule_optimization(question, filtered_sql)
+            print(f"[DEBUG] SQL with privacy filter: {filtered_sql}")
+
+            # Thực thi SQL
             async with AsyncSessionLocal() as session:
-                result = await session.execute(text(sql_query))
+                result = await session.execute(text(filtered_sql))
                 rows = result.fetchall()
                 columns = list(result.keys())
                 data = [dict(zip(columns, row)) for row in rows]
+
+            # Debug tạm thời cho câu hỏi về vắng mặt
+            if "vắng" in question.lower():
+                print(f"[DEBUG ABSENT] Question: {question}")
+                print(f"[DEBUG ABSENT] SQL: {filtered_sql}")
+                print(f"[DEBUG ABSENT] Data count: {len(data)}")
+                print(f"[DEBUG ABSENT] Data sample: {data[:3] if data else 'No data'}")
 
             answer = await self._generate_natural_answer(question, data)
 
             return {
                 "success": True,
                 "question": question,
-                "sql": sql_query,
+                "sql": filtered_sql,
                 "data": data,
                 "answer": answer,
                 "count": len(data),
@@ -572,6 +1024,32 @@ class AIService:
                 "error": str(e),
                 "answer": "Đã có lỗi xảy ra. Vui lòng thử cách hỏi khác.",
             }
+
+    def _clean_sql_output(self, raw_output) -> str:
+        cleaned = _extract_text_from_content(raw_output).strip()
+        cleaned = re.sub(r"^```sql\s*", "", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"^```\s*", "", cleaned)
+        cleaned = re.sub(r"\s*```$", "", cleaned)
+        return cleaned.strip()
+
+    def _validate_sql(self, sql: str) -> tuple[bool, str]:
+        upper = sql.upper().strip()
+        sql_clean = re.sub(r'--.*$', '', sql, flags=re.MULTILINE)
+        sql_clean = re.sub(r'/\*.*?\*/', '', sql_clean, flags=re.DOTALL).strip()
+
+        if not (upper.startswith("SELECT") or upper.startswith("(SELECT")):
+            return False, "Câu lệnh không bắt đầu bằng SELECT."
+
+        statements = [s.strip() for s in re.split(r';\s*', sql_clean) if s.strip()]
+        if len(statements) > 1:
+            return False, "Phát hiện nhiều câu lệnh SQL (multi-statement)."
+
+        dangerous = ["DROP", "DELETE", "UPDATE", "INSERT", "TRUNCATE", "ALTER", "CREATE", "EXEC", "EXECUTE"]
+        sql_no_strings = re.sub(r"'[^']*'", "''", upper)
+        for kw in dangerous:
+            if re.search(rf'\b{kw}\b', sql_no_strings):
+                return False, f"Từ khoá nguy hiểm: {kw}"
+        return True, ""
 
     async def _generate_natural_answer(self, question: str, data: List[Dict]) -> str:
         note = ""
@@ -587,8 +1065,20 @@ class AIService:
             "question": question,
             "data_str": data_str,
         })
+        
+        # Debug tạm thời cho câu hỏi về vắng mặt
+        if "vắng" in question.lower():
+            print(f"[DEBUG ABSENT ANSWER] Question: {question}")
+            print(f"[DEBUG ABSENT ANSWER] Data str: {data_str[:500]}...")
+            print(f"[DEBUG ABSENT ANSWER] Prompt: {prompt_value.text[:1000]}...")
+        
         response = await self.llm.ainvoke(prompt_value)
         content = _extract_text_from_content(response.content)
+        
+        # Debug tạm thời cho câu hỏi về vắng mặt
+        if "vắng" in question.lower():
+            print(f"[DEBUG ABSENT ANSWER] LLM Response: {content}")
+        
         return content.strip() + note
 
     # ─── TẠO BÁO CÁO LỚP CỤ THỂ ─────────────────────────────────────────────

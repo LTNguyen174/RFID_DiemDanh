@@ -1,5 +1,5 @@
 from datetime import date, datetime, time
-from typing import Optional
+from typing import Optional, Union
 
 from pydantic import BaseModel, Field
 
@@ -29,7 +29,7 @@ class UserInfo(BaseModel):
 
 class UserCreate(BaseModel):
     username: str
-    password: str
+    password: Optional[str] = None
     role: str
     full_name: Optional[str] = None
     email: Optional[str] = None
@@ -45,6 +45,7 @@ class UserOut(BaseModel):
     id: str
     username: str
     role: str
+    is_active: bool
     full_name: Optional[str] = None
     email: Optional[str] = None
     created_at: datetime
@@ -154,8 +155,8 @@ class ClassShortOut(BaseModel):
 
 class SessionCreate(BaseModel):
     date: date
-    start_time: time
-    end_time: time
+    start_time: Union[time, str]
+    end_time: Union[time, str]
     late_threshold_minutes: int = 15
     status: Optional[str] = Field(default="scheduled", max_length=20)
 
@@ -245,3 +246,48 @@ class StudentTodaySessionOut(BaseModel):
     start_time: time
     end_time: time
     status: str
+
+
+class ClassTeacherAssignIn(BaseModel):
+    teacher_user_ids: list[str]
+
+
+class AttendanceAppealCreate(BaseModel):
+    session_id: int
+    reason: str = Field(min_length=3)
+
+
+class AttendanceAppealUpdate(BaseModel):
+    status: str = Field(pattern="^(pending|approved|rejected)$")
+    note: Optional[str] = None
+
+
+class AttendanceAppealOut(BaseModel):
+    id: int
+    student_id: str
+    session_id: int
+    reason: str
+    status: str
+    note: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class SystemAuditLogOut(BaseModel):
+    id: int
+    actor_user_id: Optional[str] = None
+    action: str
+    target_type: Optional[str] = None
+    target_id: Optional[str] = None
+    details: Optional[str] = None
+    created_at: datetime
+
+
+class NotificationOut(BaseModel):
+    id: int
+    title: str
+    message: str
+    type: str
+    is_read: bool
+    created_at: datetime
+    read_at: Optional[datetime] = None

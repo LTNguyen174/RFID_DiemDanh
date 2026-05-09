@@ -2,7 +2,7 @@ from datetime import datetime, timedelta
 from typing import Optional
 
 import bcrypt
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, status, WebSocket
 from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, jwt
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -15,7 +15,7 @@ SECRET_KEY = "your-secret-key-change-in-production"  # Change this in production
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
 
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="api/auth/login")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="api/auth/login", auto_error=False)
 
 DEFAULT_PASSWORD = "123456"
 
@@ -95,6 +95,35 @@ def require_admin(current_user: User = Depends(get_current_active_user)) -> User
     return current_user
 
 
+async def get_current_user_websocket(
+    websocket: WebSocket,
+    db: AsyncSession = Depends(get_db_session)
+) -> Optional[User]:
+    """Get current user from WebSocket connection (token from query param)"""
+    try:
+        # Get token from query parameter
+        query_params = dict(websocket.query_params)
+        token = query_params.get("token")
+        
+        if not token:
+            return None
+            
+        # Decode JWT token
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        user_id: str = payload.get("sub")
+        if user_id is None:
+            return None
+            
+        # Get user from database
+        user = await db.get(User, user_id)
+        if user is None or not user.is_active:
+            return None
+            
+        return user
+    except (JWTError, ValueError):
+        return None
+
+
 def require_teacher_or_admin(current_user: User = Depends(get_current_active_user)) -> User:
     """Require teacher or admin role"""
     if current_user.role not in ["teacher", "admin"]:
@@ -103,3 +132,15 @@ def require_teacher_or_admin(current_user: User = Depends(get_current_active_use
             detail="Teacher or admin access required"
         )
     return current_user
+
+
+def require_roles(allowed_roles: list[str]):
+    """Require user role to be in allowed roles."""
+    def role_checker(current_user: User = Depends(get_current_active_user)) -> User:
+        if current_user.role not in allowed_roles:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Not enough permissions"
+            )
+        return current_user
+    return role_checker

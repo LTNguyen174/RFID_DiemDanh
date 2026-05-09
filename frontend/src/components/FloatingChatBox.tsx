@@ -22,6 +22,17 @@ export default function FloatingChatBox({ className }: FloatingChatBoxProps) {
   const [isLoading, setIsLoading] = useState(false);
   const [unreadCount, setUnreadCount] = useState(0);
   const [abortController, setAbortController] = useState<AbortController | null>(null);
+  const isLikelyReportRequest = (question: string) => {
+    const normalized = question.toLowerCase();
+    return [
+      'báo cáo',
+      'bao cao',
+      'report',
+      'xuất file',
+      'xuat file',
+      'xlsx'
+    ].some((keyword) => normalized.includes(keyword));
+  };
   
   const handleSend = async () => {
     if (!input.trim()) return;
@@ -36,19 +47,29 @@ export default function FloatingChatBox({ className }: FloatingChatBoxProps) {
     setMessages(prev => [...prev, userMessage]);
     setIsLoading(true);
     
+    const timeoutMs = isLikelyReportRequest(input) ? 180000 : 30000;
+    let timeoutId: ReturnType<typeof setTimeout> | null = null;
+
     try {
       const controller = new AbortController();
       setAbortController(controller);
-      const timeoutId = setTimeout(() => controller.abort(), 30000); // 30 seconds timeout
+      timeoutId = setTimeout(() => controller.abort(), timeoutMs);
       
       const response = await fetch('http://localhost:8000/api/chat', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...(localStorage.getItem('access_token')
+            ? { Authorization: `Bearer ${localStorage.getItem('access_token')}` }
+            : {})
+        },
         body: JSON.stringify({ question: input }),
         signal: controller.signal
       });
       
-      clearTimeout(timeoutId);
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+      }
       setAbortController(null);
       
       if (!response.ok) {
@@ -86,7 +107,8 @@ export default function FloatingChatBox({ className }: FloatingChatBoxProps) {
       
       if (error instanceof Error) {
         if (error.name === 'AbortError') {
-          errorMessage = '⏱️ Yêu cầu đã bị hủy hoặc quá thời gian chờ (30s). Vui lòng thử lại.';
+          const timeoutText = Math.round(timeoutMs / 1000);
+          errorMessage = `⏱️ Yêu cầu đã bị hủy hoặc quá thời gian chờ (${timeoutText}s). Vui lòng thử lại.`;
         } else if (error.message.includes('Failed to fetch')) {
           errorMessage = '🔴 Không kết nối được đến server. Vui lòng kiểm tra lại kết nối mạng hoặc thử lại sau.';
         } else {
@@ -102,6 +124,9 @@ export default function FloatingChatBox({ className }: FloatingChatBoxProps) {
       };
       setMessages(prev => [...prev, errorChatMessage]);
     } finally {
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+      }
       setIsLoading(false);
       setInput('');
       setAbortController(null);

@@ -5,7 +5,9 @@ from typing import Optional
 from datetime import date, datetime
 import logging
 
-from ..ai.services import ai_service
+from ..ai.services import AIService
+from ..auth import get_current_active_user
+from ..models import User
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +36,10 @@ class ReportResponse(BaseModel):
 
 
 @router.post("/chat", response_model=ChatResponse)
-async def chat_with_ai(request: ChatRequest):
+async def chat_with_ai(
+    request: ChatRequest,
+    current_user: User = Depends(get_current_active_user),
+):
     """
     Chatbot truy vấn dữ liệu điểm danh bằng tiếng Việt
     """
@@ -48,8 +53,11 @@ async def chat_with_ai(request: ChatRequest):
         
         logger.info(f"Chat query: {request.question}")
         
+        # Initialize AI service with current user for privacy protection
+        ai_service_with_user = AIService(current_user=current_user)
+        
         # Process with AI service
-        result = await ai_service.chat_query(request.question)
+        result = await ai_service_with_user.chat_query(request.question)
         
         return ChatResponse(**result)
         
@@ -67,7 +75,8 @@ async def chat_with_ai(request: ChatRequest):
 async def generate_class_report(
     class_id: int,
     start_date: date = Query(..., description="Ngày bắt đầu (YYYY-MM-DD)"),
-    end_date: date = Query(..., description="Ngày kết thúc (YYYY-MM-DD)")
+    end_date: date = Query(..., description="Ngày kết thúc (YYYY-MM-DD)"),
+    current_user: User = Depends(get_current_active_user),
 ):
     """
     Tạo báo cáo tự động cho một lớp học trong khoảng thời gian chỉ định
@@ -84,8 +93,11 @@ async def generate_class_report(
         
         logger.info(f"Generating report for class {class_id} from {start_date} to {end_date}")
         
+        # Initialize AI service with current user for privacy protection
+        ai_service_with_user = AIService(current_user=current_user)
+        
         # Generate report with AI
-        result = await ai_service.generate_class_report(class_id, start_date, end_date)
+        result = await ai_service_with_user.generate_class_report(class_id, start_date, end_date)
         
         return ReportResponse(**result)
         

@@ -62,6 +62,7 @@ type Student = {
   uid_code: string;
   student_code: string;
   full_name: string;
+  sessions?: any[];
 };
 
 type StudentTodaySession = {
@@ -128,8 +129,8 @@ export default function App() {
     }
   }, []);
 
-  const [activeTab, setActiveTab] = useState<"attendance" | "students" | "classes" | "users" | "schedule" | "profile">(
-    currentUser?.role === "student" ? "schedule" : "attendance",
+  const [activeTab, setActiveTab] = useState<"attendance" | "students" | "classes" | "users" | "schedule" | "profile" | "rfid" | "appeals" | "audit" | "notifications" | "teacher-schedule">(
+    currentUser?.role === "student" ? "schedule" : currentUser?.role === "teacher" ? "teacher-schedule" : "attendance",
   );
 
   const [realtimeEvents, setRealtimeEvents] = useState<RealtimeEvent[]>(() => {
@@ -243,6 +244,34 @@ export default function App() {
   const [newUserEmail, setNewUserEmail] = useState("");
   const [creatingUser, setCreatingUser] = useState(false);
   const [updatingUser, setUpdatingUser] = useState(false);
+  const [rfidCards, setRfidCards] = useState<any[]>([]);
+  const [rfidUid, setRfidUid] = useState("");
+  const [rfidStudentId, setRfidStudentId] = useState("");
+  const [rfidLoading, setRfidLoading] = useState(false);
+  const [auditLogs, setAuditLogs] = useState<any[]>([]);
+  const [auditLoading, setAuditLoading] = useState(false);
+  const [auditFilters, setAuditFilters] = useState({
+    start_date: "",
+    end_date: "",
+    action: "",
+    target_type: "",
+    actor_user_id: ""
+  });
+  const [appeals, setAppeals] = useState<any[]>([]);
+  const [appealsLoading, setAppealsLoading] = useState(false);
+  const [appealFilters, setAppealFilters] = useState({
+    status: "",
+    start_date: "",
+    end_date: "",
+    student_id: ""
+  });
+  const [myRfidCards, setMyRfidCards] = useState<any[]>([]);
+  const [myAppeals, setMyAppeals] = useState<any[]>([]);
+  const [mySessions, setMySessions] = useState<any[]>([]);
+  const [newAppealSessionId, setNewAppealSessionId] = useState("");
+  const [newAppealReason, setNewAppealReason] = useState("");
+  const [classTeachers, setClassTeachers] = useState<any[]>([]);
+  const [selectedTeacherIds, setSelectedTeacherIds] = useState<string[]>([]);
 
   const [showTodaySessionsModal, setShowTodaySessionsModal] = useState(false);
   const [detailStudentName, setDetailStudentName] = useState<string>("");
@@ -275,11 +304,18 @@ export default function App() {
   const [weeklyScheduleLoading, setWeeklyScheduleLoading] = useState(false);
   const [weeklyScheduleError, setWeeklyScheduleError] = useState<string | null>(null);
 
+  const [teacherSchedule, setTeacherSchedule] = useState<any[]>([]);
+  const [teacherScheduleLoading, setTeacherScheduleLoading] = useState(false);
+  const [teacherScheduleError, setTeacherScheduleError] = useState<string | null>(null);
+
   const [attendanceStats, setAttendanceStats] = useState<any>(null);
   const [attendanceStatsLoading, setAttendanceStatsLoading] = useState(false);
   const [attendanceStatsError, setAttendanceStatsError] = useState<string | null>(null);
 
   const [weeklyAttendance, setWeeklyAttendance] = useState<any[]>([]);
+  const [notifications, setNotifications] = useState<any[]>([]);
+  const [notificationsLoading, setNotificationsLoading] = useState(false);
+  const [unreadCount, setUnreadCount] = useState(0);
 
   const refreshIntervalMs = useMemo(() => 30000, []);
 
@@ -330,15 +366,18 @@ export default function App() {
     if (!newUsername.trim()) return;
     setCreatingUser(true);
     try {
+      const payload = {
+        username: newUsername.trim(),
+        role: newUserRole,
+        full_name: newUserFullname.trim() || undefined,
+        email: newUserEmail.trim() || undefined,
+      };
+      console.log("Creating user with payload:", payload);
+      
       const res = await fetch(`${apiBaseUrl}/api/users`, {
         method: "POST",
         headers: getAuthHeaders(),
-        body: JSON.stringify({
-          username: newUsername.trim(),
-          role: newUserRole,
-          full_name: newUserFullname.trim() || undefined,
-          email: newUserEmail.trim() || undefined,
-        }),
+        body: JSON.stringify(payload),
       });
       if (!res.ok) {
         const errorData = await res.json();
@@ -417,6 +456,297 @@ export default function App() {
     setEditUserFullname(user.full_name || "");
     setEditUserEmail(user.email || "");
     setShowEditUserModal(true);
+  }
+
+  async function toggleUserActive(userId: string, isActive: boolean) {
+    try {
+      const res = await fetch(`${apiBaseUrl}/api/users/${userId}/active?is_active=${!isActive}`, {
+        method: "PATCH",
+        headers: getAuthHeaders(),
+      });
+      if (!res.ok) {
+        const errorData = await res.json();
+        throw new Error(errorData.detail || "Failed to update status");
+      }
+      await fetchUsers();
+    } catch (e) {
+      const errorMessage = e instanceof Error ? e.message : "Unknown error";
+      showErrorModal("Lỗi khóa/mở tài khoản", errorMessage);
+    }
+  }
+
+  async function fetchRfidCards() {
+    setRfidLoading(true);
+    try {
+      const res = await fetch(`${apiBaseUrl}/api/rfid-cards`, { headers: getAuthHeaders() });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      setRfidCards(data);
+    } catch (e) {
+      const errorMessage = e instanceof Error ? e.message : "Unknown error";
+      showErrorModal("Lỗi tải danh sách thẻ RFID", errorMessage);
+    } finally {
+      setRfidLoading(false);
+    }
+  }
+
+  async function createRfidCard() {
+    if (!rfidUid.trim()) return;
+    setRfidLoading(true);
+    try {
+      const res = await fetch(`${apiBaseUrl}/api/rfid-cards`, {
+        method: "POST",
+        headers: getAuthHeaders(),
+        body: JSON.stringify({ uid: rfidUid.trim() }),
+      });
+      if (!res.ok) {
+        const errorData = await res.json();
+        throw new Error(errorData.detail || "Failed to create RFID card");
+      }
+      setRfidUid("");
+      await fetchRfidCards();
+    } catch (e) {
+      const errorMessage = e instanceof Error ? e.message : "Unknown error";
+      showErrorModal("Lỗi tạo thẻ RFID", errorMessage);
+    } finally {
+      setRfidLoading(false);
+    }
+  }
+
+  async function assignRfidCard(cardId: number) {
+    if (!rfidStudentId) return;
+    try {
+      const res = await fetch(`${apiBaseUrl}/api/rfid-cards/${cardId}/assign/${rfidStudentId}`, {
+        method: "PUT",
+        headers: getAuthHeaders(),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      await fetchRfidCards();
+      setRfidStudentId("");
+    } catch (e) {
+      const errorMessage = e instanceof Error ? e.message : "Unknown error";
+      showErrorModal("Lỗi gán thẻ RFID", errorMessage);
+    }
+  }
+
+  async function fetchAppeals() {
+    setAppealsLoading(true);
+    try {
+      const params = new URLSearchParams();
+      if (appealFilters.status) params.append("status", appealFilters.status);
+      if (appealFilters.start_date) params.append("start_date", appealFilters.start_date);
+      if (appealFilters.end_date) params.append("end_date", appealFilters.end_date);
+      if (appealFilters.student_id) params.append("student_id", appealFilters.student_id);
+      
+      const url = `${apiBaseUrl}/api/attendance/appeals?${params.toString()}`;
+      const res = await fetch(url, { headers: getAuthHeaders() });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      setAppeals(data);
+    } catch (e) {
+      const errorMessage = e instanceof Error ? e.message : "Unknown error";
+      showErrorModal("Lỗi tải khiếu nại", errorMessage);
+    } finally {
+      setAppealsLoading(false);
+    }
+  }
+
+  async function updateAppeal(appealId: number, status: "approved" | "rejected") {
+    try {
+      const res = await fetch(`${apiBaseUrl}/api/attendance/appeals/${appealId}`, {
+        method: "PATCH",
+        headers: getAuthHeaders(),
+        body: JSON.stringify({ status }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      await fetchAppeals();
+    } catch (e) {
+      const errorMessage = e instanceof Error ? e.message : "Unknown error";
+      showErrorModal("Lỗi cập nhật khiếu nại", errorMessage);
+    }
+  }
+
+  async function fetchAuditLogs() {
+    setAuditLoading(true);
+    try {
+      const params = new URLSearchParams();
+      if (auditFilters.start_date) params.append("start_date", auditFilters.start_date);
+      if (auditFilters.end_date) params.append("end_date", auditFilters.end_date);
+      if (auditFilters.action) params.append("action", auditFilters.action);
+      if (auditFilters.target_type) params.append("target_type", auditFilters.target_type);
+      if (auditFilters.actor_user_id) params.append("actor_user_id", auditFilters.actor_user_id);
+      
+      const url = `${apiBaseUrl}/api/system/audit-logs?${params.toString()}`;
+      const res = await fetch(url, { headers: getAuthHeaders() });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      setAuditLogs(data);
+    } catch (e) {
+      const errorMessage = e instanceof Error ? e.message : "Unknown error";
+      showErrorModal("Lỗi tải nhật ký hệ thống", errorMessage);
+    } finally {
+      setAuditLoading(false);
+    }
+  }
+
+  async function fetchMyRfidCards() {
+    try {
+      const res = await fetch(`${apiBaseUrl}/api/students/me/rfid-cards`, { headers: getAuthHeaders() });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      setMyRfidCards(data);
+    } catch (e) {
+      const errorMessage = e instanceof Error ? e.message : "Unknown error";
+      showErrorModal("Lỗi tải thẻ RFID cá nhân", errorMessage);
+    }
+  }
+
+  async function fetchMySessions() {
+    try {
+      const res = await fetch(`${apiBaseUrl}/api/students/me/sessions`, { headers: getAuthHeaders() });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      setMySessions(data);
+    } catch (e) {
+      const errorMessage = e instanceof Error ? e.message : "Unknown error";
+      showErrorModal("Lỗi tải danh sách buổi học", errorMessage);
+    }
+  }
+
+  async function fetchMyAppeals() {
+    try {
+      const res = await fetch(`${apiBaseUrl}/api/students/me/appeals`, { headers: getAuthHeaders() });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      setMyAppeals(data);
+    } catch (e) {
+      const errorMessage = e instanceof Error ? e.message : "Unknown error";
+      showErrorModal("Lỗi tải khiếu nại của bạn", errorMessage);
+    }
+  }
+
+  async function fetchNotifications(unreadOnly = false) {
+    setNotificationsLoading(true);
+    try {
+      const url = unreadOnly 
+        ? `${apiBaseUrl}/api/notifications?unread_only=true`
+        : `${apiBaseUrl}/api/notifications`;
+      const res = await fetch(url, { headers: getAuthHeaders() });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      setNotifications(data);
+    } catch (e) {
+      const errorMessage = e instanceof Error ? e.message : "Unknown error";
+      showErrorModal("Lỗi tải thông báo", errorMessage);
+    } finally {
+      setNotificationsLoading(false);
+    }
+  }
+
+  async function fetchUnreadCount() {
+    try {
+      const res = await fetch(`${apiBaseUrl}/api/notifications/unread-count`, { headers: getAuthHeaders() });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      setUnreadCount(data.unread_count || 0);
+    } catch (e) {
+      // Silently fail for count
+    }
+  }
+
+  async function markNotificationRead(notificationId: number) {
+    try {
+      const res = await fetch(`${apiBaseUrl}/api/notifications/${notificationId}/read`, {
+        method: "PATCH",
+        headers: getAuthHeaders(),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      await fetchNotifications();
+      await fetchUnreadCount();
+    } catch (e) {
+      const errorMessage = e instanceof Error ? e.message : "Unknown error";
+      showErrorModal("Lỗi cập nhật thông báo", errorMessage);
+    }
+  }
+
+  async function markAllNotificationsRead() {
+    try {
+      const res = await fetch(`${apiBaseUrl}/api/notifications/read-all`, {
+        method: "PATCH",
+        headers: getAuthHeaders(),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      await fetchNotifications();
+      await fetchUnreadCount();
+      showErrorModal("Thành công", "Đã đọc tất cả thông báo");
+    } catch (e) {
+      const errorMessage = e instanceof Error ? e.message : "Unknown error";
+      showErrorModal("Lỗi cập nhật thông báo", errorMessage);
+    }
+  }
+
+  async function createMyAppeal() {
+    if (!newAppealSessionId || !newAppealReason.trim()) return;
+    try {
+      const res = await fetch(`${apiBaseUrl}/api/attendance/appeals`, {
+        method: "POST",
+        headers: getAuthHeaders(),
+        body: JSON.stringify({
+          session_id: Number(newAppealSessionId),
+          reason: newAppealReason.trim(),
+        }),
+      });
+      if (!res.ok) {
+        const errorData = await res.json();
+        throw new Error(errorData.detail || "Failed to create appeal");
+      }
+      setNewAppealSessionId("");
+      setNewAppealReason("");
+      await fetchMyAppeals();
+      showErrorModal("Thành công", "Đã gửi khiếu nại điểm danh");
+    } catch (e) {
+      const errorMessage = e instanceof Error ? e.message : "Unknown error";
+      showErrorModal("Lỗi gửi khiếu nại", errorMessage);
+    }
+  }
+
+  async function fetchClassTeachers(classId: number) {
+    try {
+      const [teachersRes, usersRes] = await Promise.all([
+        fetch(`${apiBaseUrl}/api/classes/${classId}/teachers`, { headers: getAuthHeaders() }),
+        fetch(`${apiBaseUrl}/api/users`, { headers: getAuthHeaders() }),
+      ]);
+      if (!teachersRes.ok) throw new Error(`HTTP ${teachersRes.status}`);
+      if (!usersRes.ok) throw new Error(`HTTP ${usersRes.status}`);
+      const assigned = await teachersRes.json();
+      const usersData = await usersRes.json();
+      const teachers = usersData.filter((u: any) => u.role === "teacher");
+      setClassTeachers(teachers);
+      setSelectedTeacherIds(assigned.map((x: any) => x.id));
+    } catch (e) {
+      const errorMessage = e instanceof Error ? e.message : "Unknown error";
+      showErrorModal("Lỗi tải giảng viên phụ trách", errorMessage);
+    }
+  }
+
+  async function saveClassTeachers() {
+    if (!selectedClassForDetails) return;
+    try {
+      const res = await fetch(`${apiBaseUrl}/api/classes/${selectedClassForDetails.id}/teachers`, {
+        method: "PUT",
+        headers: getAuthHeaders(),
+        body: JSON.stringify({ teacher_user_ids: selectedTeacherIds }),
+      });
+      if (!res.ok) {
+        const errorData = await res.json();
+        throw new Error(errorData.detail || "Failed to save teacher assignment");
+      }
+      showErrorModal("Thành công", "Đã lưu phân công giảng viên");
+      await fetchClassTeachers(selectedClassForDetails.id);
+    } catch (e) {
+      const errorMessage = e instanceof Error ? e.message : "Unknown error";
+      showErrorModal("Lỗi lưu phân công giảng viên", errorMessage);
+    }
   }
 
   // Authentication functions
@@ -609,6 +939,33 @@ export default function App() {
     }
   }
 
+  function formatDate(dateString: string): string {
+    const date = new Date(dateString);
+    return date.toLocaleDateString('vi-VN', { 
+      day: '2-digit', 
+      month: '2-digit', 
+      year: 'numeric' 
+    });
+  }
+
+  async function fetchTeacherSchedule() {
+    if (!currentUser || currentUser.role !== "teacher") return;
+    setTeacherScheduleLoading(true);
+    setTeacherScheduleError(null);
+    try {
+      const res = await fetch(`${apiBaseUrl}/api/teachers/weekly-schedule`, { headers: getAuthHeaders() });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      setTeacherSchedule(data);
+    } catch (e) {
+      const errorMessage = e instanceof Error ? e.message : "Unknown error";
+      setTeacherScheduleError(errorMessage);
+      showErrorModal("Lỗi khi tải thời khóa biểu", errorMessage);
+    } finally {
+      setTeacherScheduleLoading(false);
+    }
+  }
+
   // New class creation functions
   function removeNewClassSession(index: number) {
     setNewClassSessions(newClassSessions.filter((_, i) => i !== index));
@@ -640,8 +997,8 @@ export default function App() {
     setShowEditClassModal(true);
     try {
       const [sessionsRes, studentsRes] = await Promise.all([
-        fetch(`${apiBaseUrl}/api/classes/${c.id}/sessions`),
-        fetch(`${apiBaseUrl}/api/classes/${c.id}/students`)
+        fetch(`${apiBaseUrl}/api/classes/${c.id}/sessions`, { headers: getAuthHeaders() }),
+        fetch(`${apiBaseUrl}/api/classes/${c.id}/students`, { headers: getAuthHeaders() })
       ]);
       if (sessionsRes.ok) {
         const sessionsData = await sessionsRes.json();
@@ -699,25 +1056,25 @@ export default function App() {
     try {
       const classRes = await fetch(`${apiBaseUrl}/api/classes/${editingClassData.id}`, {
         method: "PUT",
-        headers: { "Content-Type": "application/json" },
+        headers: getAuthHeaders(),
         body: JSON.stringify({ name: editingClassData.name, description: editingClassData.description }),
       });
       if (!classRes.ok) {
         const text = await classRes.text();
         throw new Error(text || `HTTP ${classRes.status}`);
       }
-      const existingSessionsRes = await fetch(`${apiBaseUrl}/api/classes/${editingClassData.id}/sessions`);
+      const existingSessionsRes = await fetch(`${apiBaseUrl}/api/classes/${editingClassData.id}/sessions`, { headers: getAuthHeaders() });
       if (existingSessionsRes.ok) {
         const existingSessions = await existingSessionsRes.json();
         await Promise.all(existingSessions.map((session: any) =>
-          fetch(`${apiBaseUrl}/api/sessions/${session.id}`, { method: "DELETE" })
+          fetch(`${apiBaseUrl}/api/sessions/${session.id}`, { method: "DELETE", headers: getAuthHeaders() })
         ));
       }
       const validSessions = editClassSessions.filter(s => s.date && s.start_time && s.end_time);
       const sessionPromises = validSessions.map(session =>
         fetch(`${apiBaseUrl}/api/classes/${editingClassData.id}/sessions`, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: getAuthHeaders(),
           body: JSON.stringify({
             date: session.date,
             start_time: session.start_time,
@@ -727,17 +1084,17 @@ export default function App() {
           }),
         })
       );
-      const existingStudentsRes = await fetch(`${apiBaseUrl}/api/classes/${editingClassData.id}/students`);
+      const existingStudentsRes = await fetch(`${apiBaseUrl}/api/classes/${editingClassData.id}/students`, { headers: getAuthHeaders() });
       if (existingStudentsRes.ok) {
         const existingStudents = await existingStudentsRes.json();
         await Promise.all(existingStudents.map((student: any) =>
-          fetch(`${apiBaseUrl}/api/classes/${editingClassData.id}/students/${student.id}`, { method: "DELETE" })
+          fetch(`${apiBaseUrl}/api/classes/${editingClassData.id}/students/${student.id}`, { method: "DELETE", headers: getAuthHeaders() })
         ));
       }
       const studentPromises = editClassStudents.length > 0 ? [
         fetch(`${apiBaseUrl}/api/classes/${editingClassData.id}/students`, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: getAuthHeaders(),
           body: JSON.stringify({ student_ids: editClassStudents }),
         })
       ] : [];
@@ -764,8 +1121,8 @@ export default function App() {
     setError(null);
     try {
       const [logsRes, dashRes] = await Promise.all([
-        fetch(`${apiBaseUrl}/api/attendance/logs?page=${page}&page_size=50`),
-        fetch(`${apiBaseUrl}/api/dashboard/today`),
+        fetch(`${apiBaseUrl}/api/attendance/logs?page=${page}&page_size=50`, { headers: getAuthHeaders() }),
+        fetch(`${apiBaseUrl}/api/dashboard/today`, { headers: getAuthHeaders() }),
       ]);
       if (!logsRes.ok) throw new Error(`Logs HTTP ${logsRes.status}`);
       if (!dashRes.ok) throw new Error(`Dashboard HTTP ${dashRes.status}`);
@@ -795,7 +1152,7 @@ export default function App() {
     setStudentsLoading(true);
     setStudentsError(null);
     try {
-      const res = await fetch(`${apiBaseUrl}/api/students`);
+      const res = await fetch(`${apiBaseUrl}/api/students`, { headers: getAuthHeaders() });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = (await res.json()) as any[];
       setStudents(data.map((s) => ({
@@ -821,7 +1178,7 @@ export default function App() {
       // Tạo sinh viên trước
       const res = await fetch(`${apiBaseUrl}/api/students`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: getAuthHeaders(),
         body: JSON.stringify({
           uid_code: uidCode.trim(),
           student_code: studentCode.trim(),
@@ -895,7 +1252,7 @@ export default function App() {
     try {
       const res = await fetch(`${apiBaseUrl}/api/students/${encodeURIComponent(editingId)}`, {
         method: "PUT",
-        headers: { "Content-Type": "application/json" },
+        headers: getAuthHeaders(),
         body: JSON.stringify({ student_code: editStudentCode.trim(), full_name: editFullName.trim() }),
       });
       if (!res.ok) {
@@ -919,7 +1276,7 @@ export default function App() {
     setDeletingId(id);
     setStudentsError(null);
     try {
-      const res = await fetch(`${apiBaseUrl}/api/students/${encodeURIComponent(id)}`, { method: "DELETE" });
+      const res = await fetch(`${apiBaseUrl}/api/students/${encodeURIComponent(id)}`, { method: "DELETE", headers: getAuthHeaders() });
       if (!res.ok) {
         const text = await res.text();
         throw new Error(text || `HTTP ${res.status}`);
@@ -961,7 +1318,7 @@ export default function App() {
     setClassesLoading(true);
     setClassesError(null);
     try {
-      const res = await fetch(`${apiBaseUrl}/api/classes`);
+      const res = await fetch(`${apiBaseUrl}/api/classes`, { headers: getAuthHeaders() });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = (await res.json()) as any[];
       setClasses(data.map((c) => ({
@@ -1009,7 +1366,7 @@ export default function App() {
     try {
       const res = await fetch(`${apiBaseUrl}/api/classes/${editingClassId}`, {
         method: "PUT",
-        headers: { "Content-Type": "application/json" },
+        headers: getAuthHeaders(),
         body: JSON.stringify({ name: editClassName.trim(), description: editClassDesc.trim() || null }),
       });
       if (!res.ok) {
@@ -1033,7 +1390,7 @@ export default function App() {
     setDeletingClassId(id);
     setClassesError(null);
     try {
-      const res = await fetch(`${apiBaseUrl}/api/classes/${id}`, { method: "DELETE" });
+      const res = await fetch(`${apiBaseUrl}/api/classes/${id}`, { method: "DELETE", headers: getAuthHeaders() });
       if (!res.ok) {
         const text = await res.text();
         throw new Error(text || `HTTP ${res.status}`);
@@ -1058,7 +1415,7 @@ export default function App() {
     try {
       const classRes = await fetch(`${apiBaseUrl}/api/classes`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: getAuthHeaders(),
         body: JSON.stringify({
           class_code: newClassCode.trim(),
           name: newClassName.trim(),
@@ -1075,7 +1432,7 @@ export default function App() {
       const sessionPromises = validSessions.map(session =>
         fetch(`${apiBaseUrl}/api/classes/${classId}/sessions`, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: getAuthHeaders(),
           body: JSON.stringify({
             date: session.date,
             start_time: session.start_time,
@@ -1088,7 +1445,7 @@ export default function App() {
       const studentPromises = newClassStudents.length > 0 ? [
         fetch(`${apiBaseUrl}/api/classes/${classId}/students`, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: getAuthHeaders(),
           body: JSON.stringify({ student_ids: newClassStudents }),
         })
       ] : [];
@@ -1114,7 +1471,7 @@ export default function App() {
     setSessionsLoading(true);
     setSessionsError(null);
     try {
-      const res = await fetch(`${apiBaseUrl}/api/classes/${classId}/sessions`);
+      const res = await fetch(`${apiBaseUrl}/api/classes/${classId}/sessions`, { headers: getAuthHeaders() });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = (await res.json()) as any[];
       setSessions(data.map((s) => ({
@@ -1135,7 +1492,7 @@ export default function App() {
 
   async function getClassStatus(classId: number): Promise<'not_started' | 'ongoing' | 'ended'> {
     try {
-      const res = await fetch(`${apiBaseUrl}/api/classes/${classId}/sessions`);
+      const res = await fetch(`${apiBaseUrl}/api/classes/${classId}/sessions`, { headers: getAuthHeaders() });
       if (!res.ok) return 'not_started';
       const sessionsData = (await res.json()) as any[];
       if (sessionsData.length === 0) return 'not_started';
@@ -1169,10 +1526,12 @@ export default function App() {
     setClassDetailsError(null);
     setEnrolledStudents([]);
     setClassSessions([]);
+    setClassTeachers([]);
+    setSelectedTeacherIds([]);
     try {
       const [studentsRes, sessionsRes] = await Promise.all([
-        fetch(`${apiBaseUrl}/api/classes/${c.id}/students/attendance`),
-        fetch(`${apiBaseUrl}/api/classes/${c.id}/sessions`)
+        fetch(`${apiBaseUrl}/api/classes/${c.id}/students/attendance`, { headers: getAuthHeaders() }),
+        fetch(`${apiBaseUrl}/api/classes/${c.id}/sessions`, { headers: getAuthHeaders() })
       ]);
       if (!studentsRes.ok) throw new Error(`Students HTTP ${studentsRes.status}`);
       if (!sessionsRes.ok) throw new Error(`Sessions HTTP ${sessionsRes.status}`);
@@ -1188,6 +1547,9 @@ export default function App() {
         end_time: s.end_time,
         status: s.status,
       })));
+      if (currentUser?.role === "admin") {
+        await fetchClassTeachers(c.id);
+      }
     } catch (e) {
       const errorMessage = e instanceof Error ? e.message : "Unknown error";
       setClassDetailsError(errorMessage);
@@ -1204,7 +1566,7 @@ export default function App() {
     try {
       const res = await fetch(`${apiBaseUrl}/api/classes/${selectedClassId}/sessions`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: getAuthHeaders(),
         body: JSON.stringify({
           date: newSessionDate,
           start_time: newSessionStart,
@@ -1251,7 +1613,7 @@ export default function App() {
     try {
       const res = await fetch(`${apiBaseUrl}/api/classes/${selectedClassId}/students`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: getAuthHeaders(),
         body: JSON.stringify({ student_ids: enrollStudentIds }),
       });
       if (!res.ok) {
@@ -1285,25 +1647,42 @@ export default function App() {
   }
 
   useEffect(() => {
-    fetchLogsAndDashboard();
-    const t = window.setInterval(fetchLogsAndDashboard, refreshIntervalMs);
-    return () => window.clearInterval(t);
-  }, [refreshIntervalMs]);
+    if (accessToken && currentUser) {
+      fetchLogsAndDashboard();
+      const t = window.setInterval(fetchLogsAndDashboard, refreshIntervalMs);
+      return () => window.clearInterval(t);
+    }
+  }, [refreshIntervalMs, accessToken, currentUser]);
 
   useEffect(() => {
-    if (activeTab === "students") {
+    if (activeTab === "students" && currentUser?.role === "admin") {
       fetchStudents();
     } else if (activeTab === "classes") {
       fetchClasses();
       fetchStudents();
     } else if (activeTab === "users" && currentUser?.role === 'admin') {
       fetchUsers();
+    } else if (activeTab === "rfid" && currentUser?.role === "admin") {
+      fetchRfidCards();
+      fetchStudents();
+    } else if (activeTab === "appeals" && currentUser && currentUser.role !== "student") {
+      fetchAppeals();
+    } else if (activeTab === "audit" && currentUser?.role === "admin") {
+      fetchAuditLogs();
     } else if (activeTab === "schedule" && currentUser?.role === 'student') {
       fetchWeeklySchedule();
+    } else if (activeTab === "teacher-schedule" && currentUser?.role === 'teacher') {
+      fetchTeacherSchedule();
     } else if (activeTab === "profile" && currentUser?.role === 'student') {
       fetchStudentProfile();
     } else if (activeTab === "attendance" && currentUser?.role === 'student') {
       fetchAttendanceStats();
+      fetchMyRfidCards();
+      fetchMySessions();
+      fetchMyAppeals();
+    } else if (activeTab === "notifications" && currentUser) {
+      fetchNotifications();
+      fetchUnreadCount();
     }
   }, [activeTab, currentUser]);
 
@@ -1521,6 +1900,68 @@ export default function App() {
           </div>
         )}
       </div>
+      <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+        <div className="rounded-lg border bg-white">
+          <div className="border-b px-4 py-3">
+            <h3 className="text-sm font-semibold text-slate-900">Thẻ RFID của bạn</h3>
+          </div>
+          <div className="px-4 py-3">
+            {myRfidCards.length === 0 ? (
+              <div className="text-xs text-slate-500">Chưa có thẻ RFID nào được gán.</div>
+            ) : (
+              <ul className="space-y-2">
+                {myRfidCards.map((card) => (
+                  <li key={card.id} className="rounded border px-3 py-2 text-sm">
+                    <div className="font-medium">{card.uid}</div>
+                    <div className="text-xs text-slate-600">Trạng thái: {card.is_active ? "Hoạt động" : "Đã khóa"}</div>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        </div>
+        <div className="rounded-lg border bg-white">
+          <div className="border-b px-4 py-3">
+            <h3 className="text-sm font-semibold text-slate-900">Khiếu nại điểm danh</h3>
+          </div>
+          <div className="space-y-3 px-4 py-3">
+            <select
+              value={newAppealSessionId}
+              onChange={(e) => setNewAppealSessionId(e.target.value)}
+              className="w-full rounded-md border px-3 py-2 text-sm"
+            >
+              <option value="">-- Chọn buổi học --</option>
+              {mySessions.map((session) => (
+                <option key={session.id} value={session.id}>
+                  {session.display_name}
+                </option>
+              ))}
+            </select>
+            <textarea
+              value={newAppealReason}
+              onChange={(e) => setNewAppealReason(e.target.value)}
+              placeholder="Nhập lý do khiếu nại..."
+              className="h-24 w-full rounded-md border px-3 py-2 text-sm"
+            />
+            <button
+              type="button"
+              onClick={createMyAppeal}
+              className="rounded-md bg-slate-900 px-3 py-2 text-sm font-medium text-white hover:bg-slate-800"
+            >
+              Gửi khiếu nại
+            </button>
+            <div className="pt-2 text-xs font-semibold text-slate-600">Lịch sử khiếu nại</div>
+            <div className="max-h-40 space-y-2 overflow-y-auto">
+              {myAppeals.map((a) => (
+                <div key={a.id} className="rounded border px-2 py-1 text-xs">
+                  <div>Session #{a.session_id} - <span className="font-medium">{a.status}</span></div>
+                  <div className="text-slate-500">{a.reason}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      </div>
     </div>
   );
 
@@ -1645,7 +2086,7 @@ export default function App() {
           <div>
             <h2 className="text-sm font-semibold text-slate-900">Lịch sử điểm danh tuần hiện tại</h2>
             <p className="text-xs text-slate-500">
-              {logsPagination.date_range.week_info || "Từ Thứ Hai đến Chủ Nhật"}
+              {logsPagination.date_range?.week_info || "Từ Thứ Hai đến Chủ Nhật"}
             </p>
           </div>
           <div className="flex gap-2">
@@ -1774,6 +2215,10 @@ export default function App() {
                   className={`rounded-md px-3 py-2 text-sm font-medium ${activeTab === "attendance" ? "bg-slate-900 text-white" : "bg-slate-100 text-slate-700 hover:bg-slate-200"}`}>
                   Điểm danh
                 </button>
+                <button type="button" onClick={() => setActiveTab("notifications")}
+                  className={`rounded-md px-3 py-2 text-sm font-medium ${activeTab === "notifications" ? "bg-slate-900 text-white" : "bg-slate-100 text-slate-700 hover:bg-slate-200"}`}>
+                  Thông báo {unreadCount > 0 && <span className="ml-1 rounded-full bg-red-500 px-2 py-0.5 text-xs text-white">{unreadCount}</span>}
+                </button>
                 <button type="button" onClick={() => setActiveTab("profile")}
                   className={`rounded-md px-3 py-2 text-sm font-medium ${activeTab === "profile" ? "bg-slate-900 text-white" : "bg-slate-100 text-slate-700 hover:bg-slate-200"}`}>
                   Thông tin cá nhân
@@ -1785,18 +2230,44 @@ export default function App() {
                   className={`rounded-md px-3 py-2 text-sm font-medium ${activeTab === "attendance" ? "bg-slate-900 text-white" : "bg-slate-100 text-slate-700 hover:bg-slate-200"}`}>
                   Real-time & Dashboard
                 </button>
-                <button type="button" onClick={() => setActiveTab("students")}
-                  className={`rounded-md px-3 py-2 text-sm font-medium ${activeTab === "students" ? "bg-slate-900 text-white" : "bg-slate-100 text-slate-700 hover:bg-slate-200"}`}>
-                  Sinh viên
-                </button>
+                {currentUser?.role === 'admin' && (
+                  <button type="button" onClick={() => setActiveTab("students")}
+                    className={`rounded-md px-3 py-2 text-sm font-medium ${activeTab === "students" ? "bg-slate-900 text-white" : "bg-slate-100 text-slate-700 hover:bg-slate-200"}`}>
+                    Sinh viên
+                  </button>
+                )}
                 <button type="button" onClick={() => setActiveTab("classes")}
                   className={`rounded-md px-3 py-2 text-sm font-medium ${activeTab === "classes" ? "bg-slate-900 text-white" : "bg-slate-100 text-slate-700 hover:bg-slate-200"}`}>
                   Lớp học
                 </button>
+                {currentUser?.role === 'teacher' && (
+                  <button type="button" onClick={() => setActiveTab("teacher-schedule")}
+                    className={`rounded-md px-3 py-2 text-sm font-medium ${activeTab === "teacher-schedule" ? "bg-slate-900 text-white" : "bg-slate-100 text-slate-700 hover:bg-slate-200"}`}>
+                    Thời khóa biểu
+                  </button>
+                )}
                 {currentUser?.role === 'admin' && (
                   <button type="button" onClick={() => setActiveTab("users")}
                     className={`rounded-md px-3 py-2 text-sm font-medium ${activeTab === "users" ? "bg-slate-900 text-white" : "bg-slate-100 text-slate-700 hover:bg-slate-200"}`}>
                     Quản lý người dùng
+                  </button>
+                )}
+                {currentUser?.role === 'admin' && (
+                  <button type="button" onClick={() => setActiveTab("rfid")}
+                    className={`rounded-md px-3 py-2 text-sm font-medium ${activeTab === "rfid" ? "bg-slate-900 text-white" : "bg-slate-100 text-slate-700 hover:bg-slate-200"}`}>
+                    Thẻ RFID
+                  </button>
+                )}
+                {currentUser?.role !== 'student' && (
+                  <button type="button" onClick={() => setActiveTab("appeals")}
+                    className={`rounded-md px-3 py-2 text-sm font-medium ${activeTab === "appeals" ? "bg-slate-900 text-white" : "bg-slate-100 text-slate-700 hover:bg-slate-200"}`}>
+                    Khiếu nại
+                  </button>
+                )}
+                {currentUser?.role === 'admin' && (
+                  <button type="button" onClick={() => setActiveTab("audit")}
+                    className={`rounded-md px-3 py-2 text-sm font-medium ${activeTab === "audit" ? "bg-slate-900 text-white" : "bg-slate-100 text-slate-700 hover:bg-slate-200"}`}>
+                    Nhật ký
                   </button>
                 )}
               </>
@@ -1859,6 +2330,110 @@ export default function App() {
                       ))}
                     </tbody>
                   </table>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* ── NOTIFICATIONS TAB (student only) ── */}
+        {activeTab === "notifications" && (
+          <div className="space-y-6">
+            <div className="rounded-lg border bg-white">
+              <div className="border-b px-4 py-3">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h2 className="text-sm font-semibold text-slate-900">Thông báo</h2>
+                    <p className="text-xs text-slate-500">Các thông báo và cập nhật hệ thống</p>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => fetchNotifications(true)}
+                      className={`rounded-md px-3 py-1 text-xs font-medium ${
+                        notificationsLoading ? "bg-gray-100 text-gray-400" : "bg-slate-100 text-slate-700 hover:bg-slate-200"
+                      }`}
+                      disabled={notificationsLoading}
+                    >
+                      Chưa đọc
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => fetchNotifications(false)}
+                      className={`rounded-md px-3 py-1 text-xs font-medium ${
+                        notificationsLoading ? "bg-gray-100 text-gray-400" : "bg-slate-100 text-slate-700 hover:bg-slate-200"
+                      }`}
+                      disabled={notificationsLoading}
+                    >
+                      Tất cả
+                    </button>
+                    {unreadCount > 0 && (
+                      <button
+                        type="button"
+                        onClick={markAllNotificationsRead}
+                        className="rounded-md bg-blue-600 px-3 py-1 text-xs font-medium text-white hover:bg-blue-700"
+                      >
+                        Đọc tất cả
+                      </button>
+                    )}
+                  </div>
+                </div>
+              </div>
+              {notificationsLoading ? (
+                <div className="px-4 py-3 text-xs text-slate-500">Đang tải...</div>
+              ) : notifications.length === 0 ? (
+                <div className="px-4 py-3 text-xs text-slate-500">Không có thông báo.</div>
+              ) : (
+                <div className="divide-y">
+                  {notifications.map((notification) => (
+                    <div
+                      key={notification.id}
+                      className={`px-4 py-3 hover:bg-slate-50 ${
+                        !notification.is_read ? "bg-blue-50 border-l-4 border-l-blue-500" : ""
+                      }`}
+                    >
+                      <div className="flex items-start justify-between">
+                        <div className="flex-1">
+                          <div className="flex items-center gap-2">
+                            <h3 className={`text-sm font-medium ${
+                              !notification.is_read ? "text-slate-900" : "text-slate-700"
+                            }`}>
+                              {notification.title}
+                            </h3>
+                            {!notification.is_read && (
+                              <span className="inline-flex items-center rounded-full bg-blue-100 px-2 py-0.5 text-xs font-medium text-blue-800">
+                                Mới
+                              </span>
+                            )}
+                            <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${
+                              notification.type === 'error' ? 'bg-red-100 text-red-800' :
+                              notification.type === 'warning' ? 'bg-yellow-100 text-yellow-800' :
+                              notification.type === 'success' ? 'bg-green-100 text-green-800' :
+                              'bg-gray-100 text-gray-800'
+                            }`}>
+                              {notification.type === 'error' ? 'Lỗi' :
+                               notification.type === 'warning' ? 'Cảnh báo' :
+                               notification.type === 'success' ? 'Thành công' :
+                               'Thông tin'}
+                            </span>
+                          </div>
+                          <p className="mt-1 text-sm text-slate-600">{notification.message}</p>
+                          <p className="mt-2 text-xs text-slate-500">
+                            {formatTimestamp(notification.created_at)}
+                          </p>
+                        </div>
+                        {!notification.is_read && (
+                          <button
+                            type="button"
+                            onClick={() => markNotificationRead(notification.id)}
+                            className="ml-3 rounded-md bg-white px-3 py-1 text-xs font-medium text-slate-700 shadow-sm ring-1 ring-inset ring-slate-300 hover:bg-slate-50"
+                          >
+                            Đánh dấu đã đọc
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  ))}
                 </div>
               )}
             </div>
@@ -2018,7 +2593,7 @@ export default function App() {
         )}
 
         {/* ── STUDENTS TAB ── */}
-        {activeTab === "students" && (
+        {activeTab === "students" && currentUser?.role === "admin" && (
           <div className="space-y-6">
             <div className="rounded-lg border bg-white">
               <div className="border-b px-4 py-3">
@@ -2334,7 +2909,62 @@ export default function App() {
           </div>
         )}
 
-        {/* ── USERS TAB (admin only) ── */}
+        {/* ── TEACHER SCHEDULE TAB (teacher only) ── */}
+        {activeTab === "teacher-schedule" && currentUser?.role === "teacher" && (
+          <div className="space-y-6">
+            <div className="rounded-lg border bg-white">
+              <div className="border-b px-4 py-3">
+                <h2 className="text-sm font-semibold text-slate-900">Thời khóa biểu tuần</h2>
+                <p className="text-xs text-slate-500">Lịch dạy trong tuần và thời gian đếm ngược</p>
+              </div>
+              {teacherScheduleLoading ? (
+                <div className="px-4 py-3 text-xs text-slate-500">Đang tải...</div>
+              ) : teacherScheduleError ? (
+                <div className="px-4 py-3 text-sm text-red-700">Lỗi: {teacherScheduleError}</div>
+              ) : teacherSchedule.length === 0 ? (
+                <div className="px-4 py-3 text-xs text-slate-500">Không có lịch dạy trong tuần này.</div>
+              ) : (
+                <div className="divide-y">
+                  {teacherSchedule.map((session, index) => (
+                    <div key={session.session_id || index} className="px-4 py-3">
+                      <div className="flex items-center justify-between">
+                        <div className="flex-1">
+                          <div className="flex items-center gap-2">
+                            <span className="font-medium text-sm text-slate-900">
+                              {session.class_code} - {session.class_name}
+                            </span>
+                            <span className={`inline-flex items-center rounded-md px-2 py-1 text-xs font-medium ring-1 ring-inset ${
+                              session.status === 'ended' ? 'bg-gray-50 text-gray-700 ring-gray-600/20' :
+                              session.status === 'upcoming' ? 'bg-blue-50 text-blue-700 ring-blue-600/20' :
+                              session.status === 'no_sessions' ? 'bg-yellow-50 text-yellow-700 ring-yellow-600/20' :
+                              'bg-gray-50 text-gray-700 ring-gray-600/20'
+                            }`}>
+                              {session.status === 'ended' ? 'Đã kết thúc' : 
+                               session.status === 'upcoming' ? 'Sắp diễn ra' : 
+                               session.status === 'no_sessions' ? 'Chưa có buổi học' : 'Đang diễn ra'}
+                            </span>
+                          </div>
+                          <div className="mt-1 text-sm text-slate-600">
+                            {session.status === 'no_sessions' ? 
+                              'Chưa tạo buổi học cho lớp này' : 
+                              `${formatDate(session.date)} • ${session.start_time} - ${session.end_time}`
+                            }
+                          </div>
+                        </div>
+                        <div className="text-right">
+                          <div className="text-xs font-medium text-slate-900">Còn lại</div>
+                          <div className="text-xs text-slate-600">{session.countdown}</div>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* ── AUDIT LOGS TAB (admin only) ── */}
         {activeTab === "users" && currentUser?.role === 'admin' && (
           <div className="space-y-6">
             <div className="rounded-lg border bg-white">
@@ -2377,6 +3007,10 @@ export default function App() {
                               className="rounded-md bg-red-600 px-2 py-1 text-xs font-medium text-white hover:bg-red-500">
                               Xóa
                             </button>
+                            <button type="button" onClick={() => toggleUserActive(u.id, !!u.is_active)}
+                              className={`rounded-md px-2 py-1 text-xs font-medium text-white ${u.is_active ? "bg-amber-600 hover:bg-amber-500" : "bg-emerald-600 hover:bg-emerald-500"}`}>
+                              {u.is_active ? "Khóa" : "Mở"}
+                            </button>
                           </div>
                         </td>
                       </tr>
@@ -2388,6 +3022,314 @@ export default function App() {
                 {usersLoading ? "Đang tải..." : `Tổng số: ${users.length}`}
               </div>
             </div>
+          </div>
+        )}
+
+        {activeTab === "rfid" && currentUser?.role === "admin" && (
+          <div className="space-y-6">
+            <div className="rounded-lg border bg-white p-4">
+              <h2 className="text-sm font-semibold text-slate-900">Quản lý thẻ RFID</h2>
+              <div className="mt-3 flex gap-2">
+                <input
+                  type="text"
+                  value={rfidUid}
+                  onChange={(e) => setRfidUid(e.target.value)}
+                  placeholder="Nhập UID thẻ"
+                  className="w-64 rounded-md border px-3 py-2 text-sm"
+                />
+                <button
+                  type="button"
+                  onClick={createRfidCard}
+                  className="rounded-md bg-slate-900 px-3 py-2 text-sm font-medium text-white hover:bg-slate-800"
+                >
+                  Thêm thẻ
+                </button>
+              </div>
+            </div>
+
+            <div className="rounded-lg border bg-white">
+              <div className="border-b px-4 py-3 text-sm font-semibold text-slate-900">Danh sách thẻ</div>
+              <div className="overflow-x-auto">
+                <table className="min-w-full divide-y">
+                  <thead className="bg-slate-50">
+                    <tr>
+                      <th className="px-4 py-3 text-left text-xs font-semibold text-slate-600">UID</th>
+                      <th className="px-4 py-3 text-left text-xs font-semibold text-slate-600">Trạng thái</th>
+                      <th className="px-4 py-3 text-left text-xs font-semibold text-slate-600">Gán sinh viên</th>
+                      <th className="px-4 py-3 text-left text-xs font-semibold text-slate-600">Thao tác</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y">
+                    {rfidCards.map((card) => (
+                      <tr key={card.id}>
+                        <td className="px-4 py-3 text-sm text-slate-900">{card.uid}</td>
+                        <td className="px-4 py-3 text-sm text-slate-700">{card.is_active ? "Hoạt động" : "Đã khóa"}</td>
+                        <td className="px-4 py-3 text-sm">
+                          <div className="flex items-center gap-2">
+                            <select
+                              value={rfidStudentId}
+                              onChange={(e) => setRfidStudentId(e.target.value)}
+                              className="rounded border px-2 py-1 text-xs"
+                            >
+                              <option value="">Chọn sinh viên</option>
+                              {students.map((s) => (
+                                <option key={s.id} value={s.id}>
+                                  {s.student_code} - {s.full_name}
+                                </option>
+                              ))}
+                            </select>
+                            <button
+                              type="button"
+                              onClick={() => assignRfidCard(card.id)}
+                              className="rounded bg-blue-600 px-2 py-1 text-xs font-medium text-white hover:bg-blue-500"
+                            >
+                              Gán
+                            </button>
+                          </div>
+                        </td>
+                        <td className="px-4 py-3 text-sm">
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              await fetch(`${apiBaseUrl}/api/rfid-cards/${card.id}/active?is_active=${!card.is_active}`, {
+                                method: "PATCH",
+                                headers: getAuthHeaders(),
+                              });
+                              fetchRfidCards();
+                            }}
+                            className="rounded bg-amber-600 px-2 py-1 text-xs font-medium text-white hover:bg-amber-500"
+                          >
+                            {card.is_active ? "Khóa thẻ" : "Mở thẻ"}
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <div className="px-4 py-3 text-xs text-slate-500">{rfidLoading ? "Đang tải..." : `Tổng số thẻ: ${rfidCards.length}`}</div>
+            </div>
+          </div>
+        )}
+
+        {activeTab === "appeals" && currentUser?.role !== "student" && (
+          <div className="rounded-lg border bg-white">
+            <div className="border-b px-4 py-3">
+              <h2 className="text-sm font-semibold text-slate-900">Khiếu nại điểm danh</h2>
+              <p className="text-xs text-slate-500">Xem và xử lý khiếu nại từ sinh viên</p>
+            </div>
+            <div className="border-b px-4 py-3 bg-slate-50">
+              <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-5">
+                <div>
+                  <label className="text-xs font-medium text-slate-700">Trạng thái</label>
+                  <select
+                    value={appealFilters.status}
+                    onChange={(e) => setAppealFilters({ ...appealFilters, status: e.target.value })}
+                    className="mt-1 w-full rounded-md border px-2 py-1 text-xs outline-none focus:border-slate-900"
+                  >
+                    <option value="">Tất cả</option>
+                    <option value="pending">Chờ xử lý</option>
+                    <option value="approved">Đã duyệt</option>
+                    <option value="rejected">Đã từ chối</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="text-xs font-medium text-slate-700">Từ ngày</label>
+                  <input
+                    type="date"
+                    value={appealFilters.start_date}
+                    onChange={(e) => setAppealFilters({ ...appealFilters, start_date: e.target.value })}
+                    className="mt-1 w-full rounded-md border px-2 py-1 text-xs outline-none focus:border-slate-900"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs font-medium text-slate-700">Đến ngày</label>
+                  <input
+                    type="date"
+                    value={appealFilters.end_date}
+                    onChange={(e) => setAppealFilters({ ...appealFilters, end_date: e.target.value })}
+                    className="mt-1 w-full rounded-md border px-2 py-1 text-xs outline-none focus:border-slate-900"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs font-medium text-slate-700">Student ID</label>
+                  <input
+                    type="text"
+                    value={appealFilters.student_id}
+                    onChange={(e) => setAppealFilters({ ...appealFilters, student_id: e.target.value })}
+                    placeholder="UUID sinh viên..."
+                    className="mt-1 w-full rounded-md border px-2 py-1 text-xs outline-none focus:border-slate-900"
+                  />
+                </div>
+                <div className="flex items-end gap-2">
+                  <button
+                    type="button"
+                    onClick={fetchAppeals}
+                    disabled={appealsLoading}
+                    className="rounded-md bg-slate-900 px-3 py-1 text-xs font-medium text-white hover:bg-slate-800 disabled:bg-slate-400"
+                  >
+                    {appealsLoading ? "Đang tải..." : "Lọc"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAppealFilters({
+                        status: "",
+                        start_date: "",
+                        end_date: "",
+                        student_id: ""
+                      });
+                    }}
+                    className="rounded-md bg-slate-100 px-3 py-1 text-xs font-medium text-slate-700 hover:bg-slate-200"
+                  >
+                    Xóa
+                  </button>
+                </div>
+              </div>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="min-w-full divide-y">
+                <thead className="bg-slate-50">
+                  <tr>
+                    <th className="px-4 py-3 text-left text-xs font-semibold text-slate-600">ID</th>
+                    <th className="px-4 py-3 text-left text-xs font-semibold text-slate-600">Sinh viên</th>
+                    <th className="px-4 py-3 text-left text-xs font-semibold text-slate-600">Buổi học</th>
+                    <th className="px-4 py-3 text-left text-xs font-semibold text-slate-600">Lý do</th>
+                    <th className="px-4 py-3 text-left text-xs font-semibold text-slate-600">Trạng thái</th>
+                    <th className="px-4 py-3 text-left text-xs font-semibold text-slate-600">Duyệt</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y">
+                  {appeals.map((a) => (
+                    <tr key={a.id}>
+                      <td className="px-4 py-3 text-sm">{a.id}</td>
+                      <td className="px-4 py-3 text-sm">{a.student_id}</td>
+                      <td className="px-4 py-3 text-sm">{a.session_id}</td>
+                      <td className="px-4 py-3 text-sm">{a.reason}</td>
+                      <td className="px-4 py-3 text-sm">{a.status}</td>
+                      <td className="px-4 py-3 text-sm">
+                        <div className="flex gap-2">
+                          <button type="button" onClick={() => updateAppeal(a.id, "approved")}
+                            className="rounded bg-emerald-600 px-2 py-1 text-xs text-white hover:bg-emerald-500">
+                            Duyệt
+                          </button>
+                          <button type="button" onClick={() => updateAppeal(a.id, "rejected")}
+                            className="rounded bg-red-600 px-2 py-1 text-xs text-white hover:bg-red-500">
+                            Từ chối
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <div className="px-4 py-3 text-xs text-slate-500">{appealsLoading ? "Đang tải..." : `Tổng số khiếu nại: ${appeals.length}`}</div>
+          </div>
+        )}
+
+        {activeTab === "audit" && currentUser?.role === "admin" && (
+          <div className="rounded-lg border bg-white">
+            <div className="border-b px-4 py-3">
+              <h2 className="text-sm font-semibold text-slate-900">Nhật ký hệ thống</h2>
+              <p className="text-xs text-slate-500">Lọc và xem lịch sử thao tác hệ thống</p>
+            </div>
+            <div className="border-b px-4 py-3 bg-slate-50">
+              <div className="grid gap-3 md:grid-cols-3 lg:grid-cols-5">
+                <div>
+                  <label className="text-xs font-medium text-slate-700">Từ ngày</label>
+                  <input
+                    type="date"
+                    value={auditFilters.start_date}
+                    onChange={(e) => setAuditFilters({ ...auditFilters, start_date: e.target.value })}
+                    className="mt-1 w-full rounded-md border px-2 py-1 text-xs outline-none focus:border-slate-900"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs font-medium text-slate-700">Đến ngày</label>
+                  <input
+                    type="date"
+                    value={auditFilters.end_date}
+                    onChange={(e) => setAuditFilters({ ...auditFilters, end_date: e.target.value })}
+                    className="mt-1 w-full rounded-md border px-2 py-1 text-xs outline-none focus:border-slate-900"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs font-medium text-slate-700">Hành động</label>
+                  <input
+                    type="text"
+                    value={auditFilters.action}
+                    onChange={(e) => setAuditFilters({ ...auditFilters, action: e.target.value })}
+                    placeholder="login, create, update..."
+                    className="mt-1 w-full rounded-md border px-2 py-1 text-xs outline-none focus:border-slate-900"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs font-medium text-slate-700">Đối tượng</label>
+                  <select
+                    value={auditFilters.target_type}
+                    onChange={(e) => setAuditFilters({ ...auditFilters, target_type: e.target.value })}
+                    className="mt-1 w-full rounded-md border px-2 py-1 text-xs outline-none focus:border-slate-900"
+                  >
+                    <option value="">Tất cả</option>
+                    <option value="user">User</option>
+                    <option value="student">Student</option>
+                    <option value="class">Class</option>
+                    <option value="session">Session</option>
+                    <option value="attendance">Attendance</option>
+                    <option value="rfid_card">RFID Card</option>
+                  </select>
+                </div>
+                <div className="flex items-end gap-2">
+                  <button
+                    type="button"
+                    onClick={fetchAuditLogs}
+                    disabled={auditLoading}
+                    className="rounded-md bg-slate-900 px-3 py-1 text-xs font-medium text-white hover:bg-slate-800 disabled:bg-slate-400"
+                  >
+                    {auditLoading ? "Đang tải..." : "Lọc"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAuditFilters({
+                        start_date: "",
+                        end_date: "",
+                        action: "",
+                        target_type: "",
+                        actor_user_id: ""
+                      });
+                    }}
+                    className="rounded-md bg-slate-100 px-3 py-1 text-xs font-medium text-slate-700 hover:bg-slate-200"
+                  >
+                    Xóa
+                  </button>
+                </div>
+              </div>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="min-w-full divide-y">
+                <thead className="bg-slate-50">
+                  <tr>
+                    <th className="px-4 py-3 text-left text-xs font-semibold text-slate-600">Thời gian</th>
+                    <th className="px-4 py-3 text-left text-xs font-semibold text-slate-600">Action</th>
+                    <th className="px-4 py-3 text-left text-xs font-semibold text-slate-600">Target</th>
+                    <th className="px-4 py-3 text-left text-xs font-semibold text-slate-600">Chi tiết</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y">
+                  {auditLogs.map((log) => (
+                    <tr key={log.id}>
+                      <td className="px-4 py-3 text-sm">{formatTimestamp(log.created_at)}</td>
+                      <td className="px-4 py-3 text-sm">{log.action}</td>
+                      <td className="px-4 py-3 text-sm">{log.target_type || "-"} / {log.target_id || "-"}</td>
+                      <td className="px-4 py-3 text-sm">{log.details || "-"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <div className="px-4 py-3 text-xs text-slate-500">{auditLoading ? "Đang tải..." : `Tổng số log: ${auditLogs.length}`}</div>
           </div>
         )}
       </main>
@@ -2425,6 +3367,42 @@ export default function App() {
                       <div><span className="font-medium text-slate-600">Số sinh viên:</span><span className="ml-2 text-slate-900">{enrolledStudents.length}</span></div>
                     </div>
                   </div>
+                  {currentUser?.role === "admin" && (
+                    <div className="rounded-lg border bg-white p-4">
+                      <div className="mb-3 text-sm font-semibold text-slate-900">Phân công giảng viên phụ trách</div>
+                      {classTeachers.length === 0 ? (
+                        <div className="text-xs text-slate-500">Chưa có tài khoản giảng viên nào.</div>
+                      ) : (
+                        <div className="grid grid-cols-1 gap-2 md:grid-cols-2">
+                          {classTeachers.map((teacher) => (
+                            <label key={teacher.id} className="flex items-center gap-2 text-sm">
+                              <input
+                                type="checkbox"
+                                checked={selectedTeacherIds.includes(teacher.id)}
+                                onChange={() => {
+                                  setSelectedTeacherIds((prev) =>
+                                    prev.includes(teacher.id)
+                                      ? prev.filter((id) => id !== teacher.id)
+                                      : [...prev, teacher.id]
+                                  );
+                                }}
+                              />
+                              <span>{teacher.full_name || teacher.username}</span>
+                            </label>
+                          ))}
+                        </div>
+                      )}
+                      <div className="mt-3">
+                        <button
+                          type="button"
+                          onClick={saveClassTeachers}
+                          className="rounded bg-slate-900 px-3 py-2 text-xs font-semibold text-white hover:bg-slate-800"
+                        >
+                          Lưu phân công
+                        </button>
+                      </div>
+                    </div>
+                  )}
                   <div className="rounded-lg border bg-white">
                     <div className="border-b px-4 py-3">
                       <h3 className="text-sm font-semibold text-slate-900">Lịch học</h3>
